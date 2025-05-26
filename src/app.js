@@ -2,6 +2,7 @@ const express = require('express');
 const routes = require('./routes/routes');
 const cors = require("cors");
 const logger = require('./config/logger');
+const cacheService = require('./services/cacheService');
 require('dotenv').config();
 
 const app = express();
@@ -27,6 +28,18 @@ process.on('uncaughtException', (error) => {
 
 process.on('unhandledRejection', (reason, promise) => {
   logger.error(`Rejeição não tratada: ${reason}`, { reason });
+});
+
+process.on('SIGTERM', async () => {
+  logger.info('SIGTERM recebido, encerrando aplicação...');
+  await cacheService.disconnect();
+  process.exit(0);
+});
+
+process.on('SIGINT', async () => {
+  logger.info('SIGINT recebido, encerrando aplicação...');
+  await cacheService.disconnect();
+  process.exit(0);
 });
 
 module.exports = { app };

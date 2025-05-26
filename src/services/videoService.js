@@ -1,26 +1,10 @@
-const fs = require('fs').promises;
-const path = require('path');
+const cacheService = require('./cacheService');
+const fileSystemService = require('./fileSystemService');
 const logger = require('../config/logger');
 
 class VideoService {
   constructor() {
-    this.uploadsDir = path.join(process.cwd(), 'uploads');
-    this.cache = new Map();
-    this.cacheTTL = 60 * 1000; // 60 segundos
-    this.ensureUploadsDir();
-  }
-
-  async ensureUploadsDir() {
-    try {
-      await fs.access(this.uploadsDir);
-    } catch {
-      await fs.mkdir(this.uploadsDir, { recursive: true });
-      logger.info(`Diretório de uploads criado: ${this.uploadsDir}`);
-    }
-  }
-
-  validateVideoFile(file) {
-    const allowedMimeTypes = [
+    this.allowedMimeTypes = [
       'video/mp4',
       'video/avi',
       'video/mov',
@@ -29,13 +13,15 @@ class VideoService {
       'video/webm',
       'video/mkv'
     ];
+    this.maxFileSize = 10 * 1024 * 1024; // 10MB
+  }
 
-    if (!allowedMimeTypes.includes(file.mimetype)) {
+  validateVideoFile(file) {
+    if (!this.allowedMimeTypes.includes(file.mimetype)) {
       throw new Error('Tipo de arquivo não suportado. Apenas vídeos são permitidos.');
     }
 
-    const maxSize = 10 * 1024 * 1024; // 10MB
-    if (file.size > maxSize) {
+    if (file.size > this.maxFileSize) {
       throw new Error('Arquivo muito grande. Tamanho máximo permitido: 10MB.');
     }
   }
@@ -44,42 +30,34 @@ class VideoService {
     this.validateVideoFile(file);
     
     const filename = `${Date.now()}-${file.originalname}`;
-    const filepath = path.join(this.uploadsDir, filename);
     
-    await fs.writeFile(filepath, file.buffer);
+    await cacheService.set(`video:${filename}`, file.buffer.toString('base64'));
     
-    this.setCacheEntry(filename, file.buffer);
+    setImmediate(async () => {
+      try {
+        await fileSystemService.writeFile(filename, file.buffer);
+        logger.info(`Vídeo persistido no sistema de arquivos: ${filename}`);
+      } catch (error) {
+        logger.error(`Erro ao persistir vídeo: ${error.message}`);
+      }
+    });
     
     logger.info(`Vídeo salvo: ${filename}`);
     return filename;
   }
 
-  setCacheEntry(filename, buffer) {
-    const cacheEntry = {
-      buffer,
-      timestamp: Date.now()
-    };
-    this.cache.set(filename, cacheEntry);
-    
-    setTimeout(() => {
-      this.cache.delete(filename);
-      logger.debug(`Cache expirado para: ${filename}`);
-    }, this.cacheTTL);
-  }
-
   async getVideo(filename) {
-    const cacheEntry = this.cache.get(filename);
-    
-    if (cacheEntry && (Date.now() - cacheEntry.timestamp) < this.cacheTTL) {
+    const cachedVideo = await cacheService.get(`video:${filename}`);
+    if (cachedVideo) {
       logger.debug(`Vídeo servido do cache: ${filename}`);
-      return cacheEntry.buffer;
+      return Buffer.from(cachedVideo, 'base64');
     }
 
-    const filepath = path.join(this.uploadsDir, filename);
-    
     try {
-      const buffer = await fs.readFile(filepath);
-      this.setCacheEntry(filename, buffer);
+      const buffer = await fileSystemService.readFile(filename);
+      
+      await cacheService.set(`video:${filename}`, buffer.toString('base64'));
+      
       logger.debug(`Vídeo carregado do sistema de arquivos: ${filename}`);
       return buffer;
     } catch (error) {
@@ -91,11 +69,8 @@ class VideoService {
   }
 
   async getVideoStats(filename) {
-    const filepath = path.join(this.uploadsDir, filename);
-    
     try {
-      const stats = await fs.stat(filepath);
-      return stats;
+      return await fileSystemService.getFileStats(filename);
     } catch (error) {
       if (error.code === 'ENOENT') {
         throw new Error('Arquivo não encontrado');
@@ -104,23 +79,14 @@ class VideoService {
     }
   }
 
-  parseRange(range, fileSize) {
-    const parts = range.replace(/bytes=/, "").split("-");
-    const start = parseInt(parts[0], 10);
-    const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
-    
-    return { start, end };
-  }
-
   async getAllVideos() {
     try {
-      const files = await fs.readdir(this.uploadsDir);
+      const files = await fileSystemService.listFiles();
       const videoFiles = [];
 
       for (const file of files) {
         try {
-          const filepath = path.join(this.uploadsDir, file);
-          const stats = await fs.stat(filepath);
+          const stats = await fileSystemService.getFileStats(file);
           
           videoFiles.push({
             filename: file,
@@ -138,6 +104,14 @@ class VideoService {
       logger.error(`Erro ao listar vídeos: ${error.message}`);
       throw new Error('Erro ao listar vídeos');
     }
+  }
+
+  parseRange(range, fileSize) {
+    const parts = range.replace(/bytes=/, "").split("-");
+    const start = parseInt(parts[0], 10);
+    const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+    
+    return { start, end };
   }
 }
 
